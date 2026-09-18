@@ -5,30 +5,29 @@ import psycopg2
 import os
 from dotenv import load_dotenv
 
-
 from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score, classification_report
 
 class TrainModel:
 
     def entrenarModelo():
 
-        #se usaron las credeciales para ingresar de manera ocacional (Transaction pooler)
         load_dotenv("/app/.env")
         USER = os.getenv("SUPABASE_USER")
         PASSWORD = os.getenv("SUPABASE_PASSWORD")
         HOST = os.getenv("SUPABASE_HOST")
         PORT = os.getenv("SUPABASE_PORT")
         DBNAME = os.getenv("SUPABASE_DBNAME")
-        
 
-        if(PORT== None):
+        if PORT is None:
             print("no se lee el env")
             return
         else:
             print("si se lee en env")
-
 
         try:
             with psycopg2.connect(
@@ -39,37 +38,57 @@ class TrainModel:
                 dbname=DBNAME
             ) as connection:
                 with connection.cursor() as cursor:
-                    # Consulta SQL
-                    cursor.execute('SELECT x, y FROM "Dataset";')
-                    rows = cursor.fetchall()  # devuelve una lista de tuplas [(x1,y1),(x2,y2),...]
-                    
+                    # La vista ya trae pais, ciudad, tipo_correo y genero_musical por cliente
+                    cursor.execute('SELECT tipo_correo, pais, ciudad, genero_musical FROM vw_cliente_genero;')
+                    rows = cursor.fetchall()
                     print(f"Filas recuperadas: {len(rows)}")
 
         except Exception as e:
             print(f"Error al conectar o recuperar datos: {e}")
             return
-        
+
         if not rows:
             print("No se recuperaron filas de la base de datos. Abortando entrenamiento.")
             return
         else:
             print(rows[:2])
-            
 
-        # Convertir la lista de tuplas a un array de NumPy
-        data_array = np.array(rows)  # shape (num_filas, 2)
+        # Convertir a DataFrame
+        df = pd.DataFrame(rows, columns=["tipo_correo", "pais", "ciudad", "genero_musical"])
 
-        # Separar columnas
-        x = data_array[:, 0].reshape(-1, 1)  # 100 x 1
-        y = data_array[:, 1].reshape(-1, 1)  # 100 x 1
+        X = df[["pais", "ciudad", "tipo_correo"]]
+        y_raw = df["genero_musical"]
 
-        #dividir en entranamiento y prueba
-        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=42)
-        
-        #entrenar el modelo
-        
-        model = LinearRegression()
-        model.fit(x_train, y_train)
-        joblib.dump(model, str(os.getenv("MODELO_ENTRENADO")))
+        # Codificar la etiqueta (genero_musical) a numeros
+        label_encoder = LabelEncoder()
+        y = label_encoder.fit_transform(y_raw)
+
+        # Codificar features categoricas con OneHotEncoder dentro de un pipeline
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ("cat", OneHotEncoder(handle_unknown="ignore"), ["pais", "ciudad", "tipo_correo"])
+            ]
+        )
+
+        modelo_pipeline = Pipeline(steps=[
+            ("preprocessor", preprocessor),
+            ("classifier", RandomForestClassifier(n_estimators=200, random_state=42))
+        ])
+
+        # Dividir en entrenamiento y prueba
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y if len(set(y)) > 1 else None
+        )
+
+        # Entrenar
+        modelo_pipeline.fit(X_train, y_train)
+
+        # Evaluar
+        y_pred = modelo_pipeline.predict(X_test)
+        print(f"Accuracy: {accuracy_score(y_test, y_pred):.4f}")
+        print(classification_report(y_test, y_pred, target_names=label_encoder.classes_))
+
+        # Guardar modelo y el label encoder
+        joblib.dump(modelo_pipeline, str(os.getenv("MODELO_ENTRENADO")))
+        joblib.dump(label_encoder, str(os.getenv("MODELO_ENTRENADO")).replace(".pkl", "_label_encoder.pkl"))
         print("modelo entrenado")
-        
